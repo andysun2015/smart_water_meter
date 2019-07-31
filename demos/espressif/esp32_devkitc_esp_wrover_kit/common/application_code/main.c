@@ -53,6 +53,7 @@
 #define mainLOGGING_MESSAGE_QUEUE_LENGTH    ( 32 )
 #define mainLOGGING_TASK_STACK_SIZE         ( configMINIMAL_STACK_SIZE * 6 )
 #define mainDEVICE_NICK_NAME                "Espressif_Demo"
+#define WIFI_RETRY_CNT                      (5)
 
 /* Declare the firmware version structure for all to see. */
 const AppVersion32_t xAppFirmwareVersion = {
@@ -151,17 +152,6 @@ int app_main( void )
 
     if( SYSTEM_Init() == pdPASS )
     {
-        int data = 100;
-        configPRINTF( ( "Try to config sensor...\r\n" ) );
-        configPRINTF( ( "config sensor: %d\r\n", sensor_config()) );
-        read_sensor_data(&data);
-        configPRINTF( ( "read sensor: %d\r\n", data) );
-        read_sensor_data(&data);
-        configPRINTF( ( "read sensor: %d\r\n", data) );
-        read_sensor_data(&data);
-        configPRINTF( ( "read sensor: %d\r\n", data) );
-        read_sensor_data(&data);
-        configPRINTF( ( "read sensor: %d\r\n", data) );
 
         /* Connect to the wifi before running the demos */
         prvWifiConnect();
@@ -171,6 +161,7 @@ int app_main( void )
         * by production ready key provisioning mechanism. */
         vDevModeKeyProvisioning();
 
+        init_sensor_thread();
         /* Run all demos. */
         DEMO_RUNNER_RunDemos();
     }
@@ -207,19 +198,24 @@ void prvWifiConnect( void )
 {
     WIFINetworkParams_t xNetworkParams;
     WIFIReturnCode_t xWifiStatus;
+    int i = 0;
 
-    xWifiStatus = WIFI_On();
+    for (i = 0; i < WIFI_RETRY_CNT; i ++) {
+        xWifiStatus = WIFI_On();
 
-    if( xWifiStatus == eWiFiSuccess )
-    {
-        configPRINTF( ( "WiFi module initialized. Connecting to AP %s...\r\n", clientcredentialWIFI_SSID ) );
-    }
-    else
-    {
-        configPRINTF( ( "WiFi module failed to initialize.\r\n" ) );
-
-        while( 1 )
+        if( xWifiStatus == eWiFiSuccess )
         {
+            configPRINTF( ( "WiFi module initialized. Connecting to AP %s...\r\n", clientcredentialWIFI_SSID ) );
+            break;
+        }
+        
+        if (i == (WIFI_RETRY_CNT - 1))
+        {
+            configPRINTF( ( "WiFi module failed to initialize.\r\n" ) );
+
+            while( 1 )
+            {
+            }
         }
     }
 
@@ -230,8 +226,28 @@ void prvWifiConnect( void )
     xNetworkParams.ucPasswordLength = sizeof( clientcredentialWIFI_PASSWORD );
     xNetworkParams.xSecurity = clientcredentialWIFI_SECURITY;
 
-    xWifiStatus = WIFI_ConnectAP( &( xNetworkParams ) );
+    //xWifiStatus = WIFI_ConnectAP( &( xNetworkParams ) );
 
+    for (i = 0; i < WIFI_RETRY_CNT; i ++) {
+        xWifiStatus = WIFI_ConnectAP( &( xNetworkParams ) );
+
+        if( xWifiStatus == eWiFiSuccess )
+        {
+            configPRINTF( ( "WiFi Connected to AP. Creating tasks which use network...\r\n" ) );
+            break;
+        }
+        
+        if (i == (WIFI_RETRY_CNT - 1))
+        {
+            configPRINTF( ( "WiFi failed to connect to AP.\r\n" ) );
+
+            portDISABLE_INTERRUPTS();
+            while( 1 )
+            {
+            }
+        }
+    }
+#if 0
     if( xWifiStatus == eWiFiSuccess )
     {
         configPRINTF( ( "WiFi Connected to AP. Creating tasks which use network...\r\n" ) );
@@ -245,6 +261,7 @@ void prvWifiConnect( void )
         {
         }
     }
+#endif
 }
 /*-----------------------------------------------------------*/
 /* configUSE_STATIC_ALLOCATION is set to 1, so the application must provide an

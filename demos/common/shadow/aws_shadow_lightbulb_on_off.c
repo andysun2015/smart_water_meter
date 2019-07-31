@@ -56,6 +56,7 @@
 /* Required for shadow demo. */
 #include "aws_shadow_lightbulb_on_off.h"
 #include "jsmn.h"
+#include "sensor.h"
 
 /* Task names. */
 #define shadowDemoCHAR_TASK_NAME           "Smart-Meter-%d"
@@ -89,6 +90,17 @@
     "\"clientToken\": \"token-%d\"" \
     "}"
 
+#define shadowDemoDESIRED_JSON_FLOW \
+    "{"                             \
+    "\"state\":{"                   \
+    "\"desired\":{"                 \
+    "\"%s\":\"%s\","                 \
+    "\"%s\":\"%s\""                 \
+    "}"                             \
+    "},"                            \
+    "\"clientToken\": \"token-%d\"" \
+    "}"
+
 /* Maximum amount of time a Shadow function call may block. */
 #define shadowDemoTIMEOUT                    pdMS_TO_TICKS( 30000UL )
 
@@ -99,7 +111,7 @@
 //#define shadowDemoSEND_UPDATE_MS             pdMS_TO_TICKS( ( 5UL * 1000UL ) )
 
 /* For sensor demo, dump a data per one minute */
-#define shadowDemoSEND_UPDATE_MS             pdMS_TO_TICKS( ( 60UL * 1000UL ) )
+#define shadowDemoSEND_UPDATE_MS             pdMS_TO_TICKS( ( 5UL * 1000UL ) )
 
 /* Name of the thing. */
 #define shadowDemoTHING_NAME                 clientcredentialIOT_THING_NAME
@@ -178,30 +190,62 @@ static ShadowTaskParam_t xShadowTaskParamBuffer[ democonfigSHADOW_DEMO_NUM_TASKS
 void int2str(int i, char *s) {
   sprintf(s,"%d",i);
 }
+static uint32_t tick1 = 0;
 
 static uint32_t prvGenerateDesiredJSON( ShadowQueueData_t * const pxShadowQueueData,
                                         const char * const pcTaskName,
-                                        uint8_t ucBulbState )
+                                        uint8_t sensor_type )
 {
+    if (tick1 == 0 ) {
+        tick1 = xTaskGetTickCount();
+    }
     /* Map cBulbState to strings. */
-    static const char * const pColors[ 2 ] = { "sensor1", "sensor2" };
-    char temp[8];
-    int2str((rand() % 90) ,temp);
-    #if 0
-    /* Generate JSON. */
-    return ( uint32_t ) snprintf( ( char * ) pxShadowQueueData->pcUpdateBuffer, shadowDemoBUFFER_LENGTH,
-                                  shadowDemoDESIRED_JSON,
-                                  pcTaskName,
-                                  pColors[ ucBulbState ],
-                                  ( int ) xTaskGetTickCount() );
-    #else
-    /* Generate JSON. */
-    return ( uint32_t ) snprintf( ( char * ) pxShadowQueueData->pcUpdateBuffer, shadowDemoBUFFER_LENGTH,
-                                  shadowDemoDESIRED_JSON,
-                                  pColors[ ucBulbState ],
-                                  temp,
-                                  ( int ) xTaskGetTickCount() );
-    #endif
+    static const char * const pType[ 2 ] = { "flowRate", "pressure_diff_sensor" };
+    double flowRate;
+    double press_diff;
+    char temp[24];
+    double sensor_data;
+    if (!sensor_type) {
+        read_sensor_FlowRate( &sensor_data);
+        printf("%s():flowRate %f\r\n",__func__,sensor_data);
+    } else {
+        read_sensor_pressure_diff(&sensor_data);
+        printf("%s():press_diff %f\r\n",__func__,sensor_data);
+    }
+
+    if (sensor_data > 0.0) {
+        if (!sensor_type) {
+            double totalWater;
+            char strTotalWater[24];
+
+            snprintf(temp, sizeof(temp),"%f",sensor_data);
+            read_sensor_totalWater(&totalWater);
+            snprintf(strTotalWater, sizeof(strTotalWater),"%f",totalWater);
+
+            /* Generate JSON. */
+            return ( uint32_t ) snprintf( ( char * ) pxShadowQueueData->pcUpdateBuffer, shadowDemoBUFFER_LENGTH,
+                                      shadowDemoDESIRED_JSON_FLOW,
+                                      pType[sensor_type],
+                                      temp,
+                                      "TotalWater",
+                                      strTotalWater,
+                                      ( int ) xTaskGetTickCount() );
+        } else {
+            snprintf(temp, sizeof(temp),"%f",sensor_data);
+            /* Generate JSON. */
+            return ( uint32_t ) snprintf( ( char * ) pxShadowQueueData->pcUpdateBuffer, shadowDemoBUFFER_LENGTH,
+                                      shadowDemoDESIRED_JSON,
+                                      pType[sensor_type],
+                                      temp,
+                                      ( int ) xTaskGetTickCount() );
+        }
+    } else {
+        return 0;
+    }
+    
+    
+    
+
 }
 /*-----------------------------------------------------------*/
 
@@ -321,20 +365,21 @@ static void prvUpdateQueueTask( void * pvParameters )
     {
         if( xQueueReceive( xUpdateQueue, &xShadowQueueData, shadowDemoRECV_QUEUE_WAIT_TICKS ) == pdTRUE )
         {
-            configPRINTF( ( "Performing Thing Shadow update.\r\n" ) );
-            xUpdateParams.ulDataLength = xShadowQueueData.ulDataLength;
+            if (xShadowQueueData.ulDataLength > 0) {
+                configPRINTF( ( "Performing Thing Shadow update.\r\n" ) );
+                xUpdateParams.ulDataLength = xShadowQueueData.ulDataLength;
 
-            xReturn = SHADOW_Update( xClientHandle, &xUpdateParams, shadowDemoTIMEOUT );
+                xReturn = SHADOW_Update( xClientHandle, &xUpdateParams, shadowDemoTIMEOUT );
 
-            if( xReturn == eShadowSuccess )
-            {
-                configPRINTF( ( "Successfully performed update.\r\n" ) );
+                if( xReturn == eShadowSuccess )
+                {
+                    configPRINTF( ( "Successfully performed update.\r\n" ) );
+                }
+                else
+                {
+                    configPRINTF( ( "Update failed, returned %d.\r\n", xReturn ) );
+                }
             }
-            else
-            {
-                configPRINTF( ( "Update failed, returned %d.\r\n", xReturn ) );
-            }
-
             /* Notify tasks that their update was completed. */
             if( xShadowQueueData.xTaskToNotify != NULL )
             {
@@ -401,6 +446,7 @@ static void prvChangeDesiredTask( void * pvParameters )
     xShadowQueueData.xTaskToNotify = pxShadowTaskParam->xTaskHandle;
 
     /* Add the initial state to the update queue, wait for the update to complete. */
+    #if 0
     ulInitialReportLength = snprintf( pcInitialReportBuffer,
                                       shadowDemoINITIAL_REPORT_BUFFER_LENGTH,
                                       shadowDemoINITIAL_REPORT_FORMAT,
@@ -408,6 +454,7 @@ static void prvChangeDesiredTask( void * pvParameters )
     xShadowQueueData.ulDataLength = prvGenerateReportedJSON( &xShadowQueueData,
                                                              pcInitialReportBuffer,
                                                              ulInitialReportLength );
+    #endif
     /* The calls below should never fail because the queue should be empty currently. */
     configASSERT( xQueueSendToBack( xUpdateQueue, &xShadowQueueData, shadowDemoSEND_QUEUE_WAIT_TICKS ) == pdTRUE );
     configASSERT( ulTaskNotifyTake( pdTRUE, shadowDemoNOTIFY_WAIT_MS ) == 1 );
@@ -420,21 +467,24 @@ static void prvChangeDesiredTask( void * pvParameters )
         configPRINTF( ( "%s changing desired state.\r\n", pxShadowTaskParam->cTaskName ) );
 
         /* Toggle the desired state and generate a new JSON document. */
+        // Used to rotate reading sensor data
         ucBulbState = !( ucBulbState );
         xShadowQueueData.ulDataLength = prvGenerateDesiredJSON( &xShadowQueueData,
                                                                 pxShadowTaskParam->cTaskName,
                                                                 ucBulbState );
-
-        /* Add the new desired state to the update queue. */
-        if( xQueueSendToBack( xUpdateQueue, &xShadowQueueData, shadowDemoSEND_QUEUE_WAIT_TICKS ) == pdTRUE )
-        {
-            /* If the new desired state was successfully added, wait for notification that the update completed. */
-            configASSERT( ulTaskNotifyTake( pdTRUE, shadowDemoNOTIFY_WAIT_MS ) == 1 );
-            configPRINTF( ( "%s done changing desired state.\r\n", pxShadowTaskParam->cTaskName ) );
-        }
-        else
-        {
-            configPRINTF( ( "Update queue full, deferring desired state change.\r\n" ) );
+        /* Perform update only when returned Data length grater than zero */
+        if (xShadowQueueData.ulDataLength > 0) {
+            /* Add the new desired state to the update queue. */
+            if( xQueueSendToBack( xUpdateQueue, &xShadowQueueData, shadowDemoSEND_QUEUE_WAIT_TICKS ) == pdTRUE )
+            {
+                /* If the new desired state was successfully added, wait for notification that the update completed. */
+                configASSERT( ulTaskNotifyTake( pdTRUE, shadowDemoNOTIFY_WAIT_MS ) == 1 );
+                configPRINTF( ( "%s done changing desired state.\r\n", pxShadowTaskParam->cTaskName ) );
+            }
+            else
+            {
+                configPRINTF( ( "Update queue full, deferring desired state change.\r\n" ) );
+            }
         }
 
         vTaskDelayUntil( &xLastWakeTime, shadowDemoSEND_UPDATE_MS );
@@ -484,6 +534,7 @@ static void prvShadowInitTask( void * pvParameters )
             xCallbackParams.xShadowUpdatedCallback = NULL;
             xCallbackParams.xShadowDeletedCallback = NULL;
             xCallbackParams.xShadowDeltaCallback = prvDeltaCallback;
+            //xCallbackParams.xShadowDeltaCallback = NULL;
 
             xReturn = SHADOW_RegisterCallbacks( xClientHandle,
                                                 &xCallbackParams,
